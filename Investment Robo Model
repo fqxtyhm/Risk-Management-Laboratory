@@ -16,3 +16,450 @@ import math
 import json
 import csv
 import ast
+
+
+def optimal_para_selection(series, i):
+  # Define the p, d and q parameters to take any value between 0 and 2
+  p = d = q = range(0, 2)
+
+  # Generate all different combinations of seasonal p, q and q triplets
+  seasonal_pdq = [(x[0], x[1], x[2], 12) for x in list(itertools.product(p, d, q))]
+
+  # Generate all different combinations of p, q and q triplets
+  pdq = list(itertools.product(p, d, q))
+  warnings.filterwarnings("ignore") # specify to ignore warning messages
+  
+  aic = 1000000000
+  param_optimal = 0
+  param_seasonal_optimal = 0
+  for param in pdq:
+      for param_seasonal in seasonal_pdq:
+          try:
+              mod = sm.tsa.statespace.SARIMAX(series,
+                                            order=param,
+                                            seasonal_order=param_seasonal,
+                                            enforce_stationarity=False,
+                                            enforce_invertibility=False)
+
+              results = mod.fit()
+              if results.aic < aic:
+                #print('ARIMA{}x{}12 - AIC:{}'.format(param, param_seasonal, results.aic))
+                aic = results.aic
+                param_optimal = param
+                param_seasonal_optimal = param_seasonal
+          except:
+              continue
+  return (param_optimal, param_seasonal_optimal, aic)
+
+
+
+
+def evaluate_model(series, param_optimal, param_seasonal_optimal):
+
+  mod = sm.tsa.statespace.SARIMAX(series,
+                                order=param_optimal,
+                                seasonal_order=param_seasonal_optimal,
+                                enforce_stationarity=False,
+                                enforce_invertibility=False)
+
+  results = mod.fit()
+  
+  
+  return results
+  
+
+def evaluate_plot(i, series,results, test_start_day, plot_start_day,fig):
+  sub = fig.add_subplot(6,5,i+16)
+  test_start_day = series[test_start_day-relativedelta(days=+6):test_start_day].index[0].date()
+  test_start_day = datetime.strptime(str(test_start_day), '%Y-%m-%d').date()
+  pred = results.get_prediction(start=pd.to_datetime(test_start_day), dynamic=False)
+  # fig=plt.figure(figsize=(15, 15))
+  ax = series[plot_start_day:].plot()#label='observed')
+  pred.predicted_mean.plot(ax=ax, label='One-step ahead Forecast', alpha=.7)
+  pred_ci = pred.conf_int()
+  ax.fill_between(pred_ci.index,
+                  pred_ci.iloc[:, 0],
+                  pred_ci.iloc[:, 1], color='k', alpha=.2)
+
+  ax.set_xlabel('Date')
+  ax.set_ylabel('Price')
+  plt.legend()
+  #plt.show()
+  # plt.savefig('Evaluate Plot: Rebalance Period ')
+  return ax
+
+
+
+def train_model(series_train, param_optimal, param_seasonal_optimal):
+  
+  mod = sm.tsa.statespace.SARIMAX(series_train,
+                                  order=param_optimal,
+                                  seasonal_order=param_seasonal_optimal,
+                                  enforce_stationarity=False,
+                                  enforce_invertibility=False)
+
+  results = mod.fit()
+
+  return results
+
+def prediction(train_result,i):
+  # Get forecast 500 steps ahead in future
+  pred_uc = train_result.get_forecast(steps=len(test))
+
+  # Get confidence intervals of forecasts
+  pred_ci = pred_uc.conf_int()
+  test['pred'+str(i)] = pred_uc.predicted_mean.values
+  return test
+
+def investment_plot(i,series_train, numOfETF,actual,fig):
+  # fig=plt.figure(figsize=(15, 15))
+  
+  if actual:
+    sub = fig.add_subplot(6, 5, i+1)
+    ax = test.iloc[:,i].plot(label='actual')
+    #print(test.iloc[:,i])
+    test.iloc[:,i+numOfETF].plot(ax=ax,label='predicted')
+  else: 
+    sub = fig.add_subplot(3, 5, i+1)
+    ax = test.iloc[:,i+numOfETF].plot(label='predicted')
+  #print(test.iloc[:,i+14])
+  series_train.plot()
+  ax.set_xlabel('Date')
+  ax.set_ylabel('Price')
+  plt.legend()
+
+  # plt.savefig('Investment Plot: Rebalance Period ' + str(i))
+  # return ax
+
+#### ARIMA
+# download data from yahoo finance
+tickers = 'SPY XLK IWO VXUS XIC.TO BND SHY VCSH IGOV XBB.TO XSH.TO VHT GLD VNQ'
+# data = yf.download(tickers=tickers, start="2012-01-01", end=invest_end_day,interval='1wk')
+final_day = datetime.strptime('2020-05-31', '%Y-%m-%d').date()
+df = yf.download(tickers=tickers, start="2012-01-01", end=final_day,interval='1wk')['Adj Close'].dropna()
+
+
+numOfETF = len(df.columns)
+ # reduce dataframe to rows, where all asset prices are present
+plot_start_day = '2012'
+# initialize 
+invest_end_day = datetime.strptime("2015-04-01", '%Y-%m-%d').date()
+
+# end_date = datetime.strptime(final_day, '%Y-%m-%d').date()
+start_date = invest_end_day
+num_months = (final_day.year - start_date.year) * 12 + (final_day.month - start_date.month)
+num_of_forcast = math.ceil(num_months/6)
+
+forcast_monthly_return_table = pd.DataFrame()
+# print(forcast_monthly_return_table)
+#print(df)
+
+# download risk free data from yahoo finance
+RF_tickers = '^IRX'
+# calcualte rf
+Rf_price = yf.download(tickers=RF_tickers, start="2012-01-01", end=final_day,interval='1wk')['Adj Close'].dropna()
+
+Rf_return = Rf_price.resample('M').ffill().pct_change().dropna()
+
+
+#print(Rf_return)
+# read forcast expected return of ETFs
+Rp = pd.read_csv("expected_return_rebalance.csv",index_col='ETFs')
+#print(Rp)
+rf_table = pd.DataFrame()
+# etf return
+ETF_return = df.resample('M').ffill().pct_change().dropna()
+#print(ETF_return)
+# column is date, row is ETF name
+excess_return = ETF_return.T-Rf_return.T
+#print(excess_return)
+Q_excess_return_cov = {}
+print(excess_return)
+
+# no need to run
+
+run_loop=False
+if run_loop:
+  #for j in range(2):
+  for j in range(num_of_forcast):
+    forcast_monthly_return = [0]*len(df.columns)
+    # loop inside relablance
+
+    invest_start_day = invest_end_day
+    invest_end_day = invest_start_day + relativedelta(months=+6)
+    #invet_end_day.strftime('%Y-%m-%d')
+    #print(df[[invest_end_day,'BND']])
+    # for last forcast period less than 6 months, use final day as last day
+    if invest_end_day > final_day:
+      invest_end_day = final_day
+
+    end_day = invest_start_day - relativedelta(days=1)
+    test_start_day = end_day - relativedelta(years=2)
+
+    test = df[invest_start_day:invest_end_day]
+
+  # transpose data to filter by date
+    excess_return_T = excess_return.T
+    historical_excess_return = excess_return_T[:end_day]
+    # transpose back data to get the coverance
+    historical_excess_return_T = historical_excess_return.T
+    Q_excess_return_cov[invest_start_day] = np.cov(historical_excess_return_T)*4 # convert from weekly to monthly
+    # # rf: 
+    # # print(invest_start_day)
+    # Rf_list = [float(Rf_return[invest_start_day+relativedelta(months=-1):invest_start_day].values)]*len(df.columns)
+    # # # print(Rf_return[invest_start_day+relativedelta(months=-1):invest_start_day].index[0])
+    # # # create rf table (Rf for 6 months ago)
+    # rf_table[invest_end_day] = Rf_list
+    #for i in range(1):
+    fig = plt.figure(figsize=(15,15))
+    for i in range(len(df.columns)):
+    # for model selection 
+      series = df[:end_day]
+      series = series.iloc[:,i].dropna()
+      param_optimal, param_seasonal_optimal, aic = optimal_para_selection(series,i)
+      # results = evaluate_model(series,param_optimal, param_seasonal_optimal)
+      # evaluate_plot(i, series, results,test_start_day,plot_start_day) 
+
+      # for rebalance
+      series_train = series # [test_start_day:end_day]
+      train_result = train_model(series_train,param_optimal, param_seasonal_optimal)
+      # test data frame adding the predicted value
+      test = prediction(train_result,i)
+      # print(test.head())
+      #  performance of first rebalancing 
+
+      investment_plot(i,series_train,numOfETF, False, fig) # NOT plot actual price
+      #plt.subplot(ax)
+      # calculate monthly return
+      forcast_monthly_return[i] = test['pred'+str(i)].resample('M').ffill().pct_change().dropna().mean()
+    fig.tight_layout()
+    plt.savefig("Investment Plot: Rebalance Period "+str(j))
+
+    forcast_monthly_return_table[invest_start_day] = forcast_monthly_return
+  forcast_monthly_return_table.insert(0,column='ETFs',value=df.columns)  
+  forcast_monthly_return_table.to_csv("expected_return_rebalance.csv",index=False)
+
+  # save Q output
+  # no headers, first column is date, second column is covariance matrix Q
+  with open('Q_output.csv',"w", newline="") as f:
+    writer = csv.writer(f)
+    for key, val in Q_excess_return_cov.items():
+      writer.writerow([key, val])
+
+invest_end_day = datetime.strptime("2015-04-01", '%Y-%m-%d').date()
+#for j in range(1):
+for j in range(num_of_forcast):
+ 
+  # loop inside relablance
+
+  invest_start_day = invest_end_day
+  invest_end_day = invest_start_day + relativedelta(months=+6)
+  #invet_end_day.strftime('%Y-%m-%d')
+  #print(df[[invest_end_day,'BND']])
+  # for last forcast period less than 6 months, use final day as last day
+  if invest_end_day > final_day:
+    invest_end_day = final_day
+
+  end_day = invest_start_day - relativedelta(days=1)
+  test_start_day = end_day - relativedelta(years=2)
+
+  # # print(invest_start_day)
+  Rf_list = [float(Rf_return[invest_start_day+relativedelta(months=-1):invest_start_day].values)]*len(df.columns)
+  # # print(Rf_return[invest_start_day+relativedelta(months=-1):invest_start_day].index[0])
+  # # create rf table (Rf for 6 months ago)
+  rf_table[invest_start_day] = Rf_list
+# read csv file
+forcast_monthly_return_table = pd.read_csv("expected_return_rebalance.csv",index_col='ETFs')
+
+# read Q
+reader = csv.reader(open('Q_output.csv', 'r', newline=''))
+Q_excess_return_cov_read = {}
+for row in reader:
+    k, v = row
+    v = v.replace("\n ","").replace("][","] [").replace(" ]","]")
+    v = ' '.join(v.split())
+    Q_excess_return_cov_read[k] = np.asarray(json.loads(v.replace(" ",",")),dtype=np.float32)
+
+# calculate the input parameter for black litterman
+sigma_dict ={}
+Rp_rf = {}
+risk_aversion_lambda = {}
+xmkt_weight ={}
+PI = {}
+u = 0;
+# print(Q_excess_return_cov)
+for date_key in Q_excess_return_cov_read:
+    #print(type(Q_excess_return_cov_read[date_key]))
+    xmkt_weight[date_key] = forcast_monthly_return_table["weight"].to_numpy().T 
+    # monthly covariance
+    sigma_dict[date_key] = np.dot(np.dot(xmkt_weight[date_key],Q_excess_return_cov_read[date_key]),xmkt_weight[date_key].T)
+    Rp_rf[date_key] = np.dot(forcast_monthly_return_table.iloc[:,u],xmkt_weight[date_key]) - rf_table.iloc[1,u]
+    #Rp_rf[date_key]  = forcast_monthly_return[u]  - rf_table_bt[u] 
+    # lambda
+    risk_aversion_lambda[date_key]  = Rp_rf[date_key] /sigma_dict[date_key] 
+    ##print(risk_aversion_lambda[date_key])
+    # implied equilibruim return vector
+    PI[date_key]  = risk_aversion_lambda[date_key] *np.dot(Q_excess_return_cov_read[date_key],xmkt_weight[date_key])
+    #print(PI[date_key])
+    u = u + 1;
+PI
+
+
+### ARIMA backtesting
+
+# data = yf.download(tickers=tickers, start="2012-01-01", end=invest_end_day,interval='1wk')
+final_day = datetime.strptime('2015-03-31', '%Y-%m-%d').date()
+df = yf.download(tickers=tickers, start="2012-01-01", end=final_day,interval='1wk')['Adj Close'].dropna()
+numOfETF = len(df.columns)
+ # reduce dataframe to rows, where all asset prices are present
+plot_start_day = '2012'
+# initialize 
+invest_end_day = datetime.strptime("2014-04-01", '%Y-%m-%d').date()
+
+# end_date = datetime.strptime(final_day, '%Y-%m-%d').date()
+start_date = invest_end_day
+num_months = (final_day.year - start_date.year) * 12 + (final_day.month - start_date.month)
+num_of_forcast = math.ceil(num_months/6)
+
+forcast_monthly_return_table_bt = pd.DataFrame()
+
+print(num_of_forcast)
+
+
+
+
+# calcualte rf
+Rf_price = yf.download(tickers=RF_tickers, start="2012-01-01", end=final_day,interval='1wk')['Adj Close'].dropna()
+
+Rf_return = Rf_price.resample('M').ffill().pct_change().dropna()
+
+#print(Rp)
+rf_table_bt = pd.DataFrame()
+# etf return
+ETF_return = df.resample('M').ffill().pct_change().dropna()
+#print(ETF_return)
+# column is date, row is ETF name
+excess_return = ETF_return.T-Rf_return.T
+#print(excess_return)
+Q_excess_return_cov_bt = {}
+
+#for j in range(2):
+for j in range(num_of_forcast):
+  forcast_monthly_return = [0]*len(df.columns)
+  # loop inside relablance
+
+  invest_start_day = invest_end_day
+  invest_end_day = invest_start_day + relativedelta(months=+6)
+  # for last forcast period less than 6 months, use final day as last day
+
+  if invest_end_day > final_day:
+    invest_end_day = final_day
+  
+  end_day = invest_start_day - relativedelta(days=1)
+  test_start_day = end_day - relativedelta(years=1)
+  test = df[invest_start_day:invest_end_day]
+  
+  # transpose data to filter by date
+  excess_return_T = excess_return.T
+  historical_excess_return = excess_return_T[:end_day]
+  # transpose back data to get the coverance
+  historical_excess_return_T = historical_excess_return.T
+  Q_excess_return_cov_bt[invest_start_day] = np.cov(historical_excess_return_T)*4
+  # # rf: 
+  # # print(invest_start_day)
+  Rf_list = [float(Rf_return[invest_start_day+relativedelta(months=-1):invest_start_day].values)]*len(df.columns)
+  # # print(Rf_return[invest_start_day+relativedelta(months=-1):invest_start_day].index[0])
+  # # create rf table (Rf for 6 months ago)
+  rf_table_bt[invest_start_day] = Rf_list
+ 
+  fig = plt.figure(figsize=(30,30))
+  #fig_investment = plt.figure()
+  # for i in range(1):
+  for i in range(len(df.columns)):
+  # for model selection 
+    series = df[:end_day]
+    series = series.iloc[:,i].dropna()
+    param_optimal, param_seasonal_optimal, aic = optimal_para_selection(series,i)
+    results = evaluate_model(series,param_optimal, param_seasonal_optimal)
+    print(results.summary().tables[1])
+    evaluate_plot(i, series, results,test_start_day,plot_start_day, fig) 
+
+    # for rebalance
+    # use all the historical data to train the model
+    series_train = series #[test_start_day:end_day]
+
+    train_result = train_model(series_train,param_optimal, param_seasonal_optimal)
+
+    # test data frame adding the predicted value
+    test = prediction(train_result,i)
+    #  performance of first rebalancing 
+    investment_plot(i,series_train,numOfETF,True, fig)
+
+    # calculate monthly return
+    forcast_monthly_return[i] = test['pred'+str(i)].resample('M').ffill().pct_change().dropna().mean()
+  forcast_monthly_return_table_bt[invest_start_day] = forcast_monthly_return
+  fig.tight_layout()
+  plt.savefig("Evaluate and Investment Plot: Rebalance Period "+str(j))
+  #fig_investment.savefig("Investment Plot: Rebalance Period "+str(j))
+
+forcast_monthly_return_table_bt.insert(0,column='ETFs',value=df.columns)  
+forcast_monthly_return_table_bt.to_csv("expected_return_validate.csv",index=False)
+
+# save Q output
+# no headers, first column is date, second column is covariance matrix Q
+with open('Q_output_bt.csv',"w", newline="") as f:
+  writer = csv.writer(f)
+  for key, val in Q_excess_return_cov_bt.items():
+    writer.writerow([key, val])
+
+forcast_monthly_return_table_bt = pd.read_csv("expected_return_validate.csv",index_col='ETFs')
+forcast_monthly_return_table = pd.read_csv("expected_return_rebalance.csv",index_col='ETFs')#
+# read Q
+reader = csv.reader(open('Q_output_bt.csv', 'r', newline=''))
+Q_excess_return_cov_bt = {}
+for row in reader:
+    k, v = row
+    v = v.replace("\n ","").replace("][","] [").replace(" ]","]")
+    v = ' '.join(v.split())
+    #print(v)
+    Q_excess_return_cov_bt[k] = np.asarray(json.loads(v.replace(" ",",")),dtype=np.float32)
+#print(Q_excess_return_cov_bt)
+sigma_dict_bt ={}
+Rp_rf_bt = {}
+risk_aversion_lambda_bt = {}
+xmkt_weight_bt ={}
+PI_bt = {}
+u = 0;
+for date_key in Q_excess_return_cov_bt:
+    #print(forcast_monthly_return_table["weight"].to_numpy().T)
+    xmkt_weight_bt[date_key] = forcast_monthly_return_table["weight"].to_numpy().T 
+    
+    sigma_dict_bt[date_key] = np.dot(np.dot(xmkt_weight_bt[date_key],Q_excess_return_cov_bt[date_key]),xmkt_weight_bt[date_key].T)
+    #print(u)
+    #print(rf_table_bt)
+    Rp_rf_bt[date_key] = np.dot(forcast_monthly_return_table_bt.iloc[:,u],xmkt_weight_bt[date_key]) - rf_table_bt.iloc[1,u]
+    #print(np.dot(forcast_monthly_return_table_bt.iloc[:,u],xmkt_weight.T))
+    #Rp_rf[date_key]  = forcast_monthly_return[u]  - rf_table_bt[u] 
+    # lambda
+    risk_aversion_lambda_bt[date_key]  = Rp_rf_bt[date_key] /sigma_dict_bt[date_key] 
+    #print(risk_aversion_lambda)
+    # implied equilibruim return vector
+    PI_bt[date_key]  = risk_aversion_lambda_bt[date_key] *np.dot(Q_excess_return_cov_bt[date_key],xmkt_weight_bt[date_key])
+    #print(PI[date_key])
+    u = u + 1;
+#PI_bt
+
+## Black-litterman model
+from numpy import linalg,dot,ones
+import pandas_datareader.data as web
+import scipy.optimize 
+import datetime
+import math
+from dateutil.relativedelta import relativedelta
+#from cvxopt import matrix, solvers,spmatrix
+from pandas.tseries.offsets import BDay
+from scipy.stats import skew, kurtosis
+
+
+
+
